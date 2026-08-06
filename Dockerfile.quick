@@ -1,0 +1,6 @@
+FROM 4494faa2d3fc
+# 只替换Python代码（不重新安装依赖和Playwright）
+COPY common /app/common
+COPY backend-web /app/backend-web
+COPY launcher /app/launcher
+CMD ["python", "backend-web/main.py"]

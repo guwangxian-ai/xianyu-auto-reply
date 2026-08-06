@@ -1,0 +1,20 @@
+# 使用本地构建的新镜像部署
+services:
+  backend-web:
+    image: xianyu-backend-web:latest
+    build:  # 禁用build，直接使用image
+    init: true  # 自动回收僵尸进程
+  websocket:
+    image: xianyu-websocket:latest
+    build:
+    init: true  # 自动回收僵尸进程
+  scheduler:
+    image: xianyu-scheduler:latest
+    build:
+  frontend:
+    image: xianyu-frontend:latest
+    build:
+  mysql:
+    image: registry.cn-shanghai.aliyuncs.com/zhinian-software/xianyu-mysql:8.0
+  redis:
+    image: registry.cn-shanghai.aliyuncs.com/zhinian-software/xianyu-redis:7-alpine

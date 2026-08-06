@@ -355,6 +355,8 @@ class XianyuPublisher:
 
             await self._fill_price(item_data)
 
+            await self._fill_stock(item_data)
+
             logger.info("\n[步骤10] ⏭️ 跳过服务选择...")
             await asyncio.sleep(1)
             logger.info("\n[步骤11] ⏭️ 跳过服务选择...")
@@ -1575,6 +1577,64 @@ class XianyuPublisher:
                 logger.info("ℹ️ 未找到原价输入框，跳过（原价是可选的）")
         else:
             logger.info("ℹ️ 未设置原价，跳过")
+
+    async def _fill_stock(self, item_data: dict) -> None:
+        """填写库存数量"""
+        stock = int(item_data.get("stock", 0) or 0)
+        if stock <= 0:
+            logger.info("ℹ️ 未设置库存，跳过")
+            return
+
+        if not self.page:
+            raise Exception("浏览器页面未初始化")
+
+        logger.info(f"\n[步骤11.5] 📦 填写库存: {stock}")
+
+        stock_selectors = [
+            'input[placeholder*="库存"]',
+            'input[aria-label*="库存"]',
+            'input[placeholder*="数量"]',
+            'input[aria-label*="数量"]',
+            'input[name*="stock"]',
+            'input[id*="stock"]',
+            '[class*="stock"] input',
+            '[class*="inventory"] input',
+            'xpath=//*[contains(normalize-space(.), "库存")]/following::input[1]',
+            'xpath=//*[contains(normalize-space(.), "数量")]/following::input[1]',
+        ]
+
+        stock_input = None
+        for selector in stock_selectors:
+            try:
+                candidate = await self.page.wait_for_selector(selector, timeout=2000)
+                if candidate and await candidate.is_visible() and await candidate.is_enabled():
+                    stock_input = candidate
+                    logger.info(f"✅ 找到库存输入框: {selector}")
+                    break
+            except Exception:
+                continue
+
+        if not stock_input:
+            logger.warning("⚠️ 未找到库存输入框，跳过库存填写")
+            return
+
+        try:
+            await stock_input.click()
+            await asyncio.sleep(0.2)
+        except Exception:
+            pass
+
+        try:
+            await stock_input.fill("")
+        except Exception:
+            try:
+                await stock_input.press("Control+A")
+                await stock_input.press("Backspace")
+            except Exception:
+                pass
+
+        await stock_input.fill(str(stock))
+        logger.info(f"✅ 库存已设置为 {stock}")
 
     async def _set_free_shipping(self):
         """设置发货方式为包邮（按原项目流程）"""

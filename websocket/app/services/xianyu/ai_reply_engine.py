@@ -643,7 +643,7 @@ class AIReplyEngine:
         self,
         settings: Dict,
         messages: List[Dict],
-        max_tokens: int = 100,
+        max_tokens: int = 500,
         temperature: float = 0.7,
     ) -> str:
         """调用Anthropic Claude官方API"""

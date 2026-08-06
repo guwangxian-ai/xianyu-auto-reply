@@ -29,7 +29,8 @@ deps = tomllib.load(open('/app/scheduler/pyproject.toml','rb')).get('project',{}
 open('/tmp/requirements.txt','w').write('\n'.join(deps))" && \
     pip install --no-cache-dir -r /tmp/requirements.txt
 
-# 安装Playwright浏览器
+# 安装Playwright浏览器（国内镜像加速）
+ENV PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/
 RUN python -m playwright install --with-deps chromium
 
 # 创建日志目录

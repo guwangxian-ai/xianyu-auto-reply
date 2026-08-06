@@ -81,6 +81,7 @@ class PublishSingleRequest(BaseModel):
     postage: float = Field(0, ge=0, description="邮费，0表示包邮")
     brand: Optional[str] = Field(None, description="品牌")
     condition: str = Field("全新", description="成色")
+    stock: Optional[int] = Field(None, ge=1, description="库存数量，虚拟物品建议999")
 
 
 class BatchPublishRequest(BaseModel):
