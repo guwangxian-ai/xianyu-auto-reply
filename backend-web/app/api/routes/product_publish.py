@@ -15,7 +15,7 @@ import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Query, UploadFile
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_active_user, get_db_session
@@ -112,15 +112,21 @@ class MaterialCreateRequest(BaseModel):
     specifications: List[ProductSpecificationRequest] = Field(default_factory=list, max_length=2)
     sku_rows: List[PublishSkuRowRequest] = Field(default_factory=list, max_length=200)
     quantity: int = Field(1, ge=1, le=999999, description="发布数量")
-    delivery_method: str = Field("express", description="发货方式：express/pickup")
+    delivery_method: str = Field("express", pattern="^(express|pickup)$", description="发货方式：express/pickup")
     shipping_method: str = Field("free", pattern="^(free|distance|fixed|template|none)$")
     support_pickup: bool = False
-    postage: float = Field(0, ge=0, description="邮费，0表示包邮")
+    postage: float = Field(0, ge=0, le=1000, description="邮费，0表示包邮")
     address: Optional[str] = Field(None, max_length=200, description="宝贝所在地")
     address_expected_text: Optional[str] = Field(None, max_length=200)
     brand: Optional[str] = Field(None, max_length=100, description="品牌")
     condition: str = Field("全新", description="成色")
     remark: Optional[str] = Field(None, max_length=500, description="备注（内部使用）")
+
+    @model_validator(mode="after")
+    def normalize_delivery_method(self) -> "MaterialCreateRequest":
+        """以 shipping_method 为发布载荷事实来源，统一兼容字段。"""
+        self.delivery_method = "pickup" if self.shipping_method == "none" else "express"
+        return self
 
 
 class MaterialUpdateRequest(BaseModel):
@@ -148,12 +154,19 @@ class MaterialUpdateRequest(BaseModel):
     delivery_method: Optional[str] = Field(None, pattern="^(express|pickup)$")
     shipping_method: Optional[str] = Field(None, pattern="^(free|distance|fixed|template|none)$")
     support_pickup: Optional[bool] = None
-    postage: Optional[float] = Field(None, ge=0)
+    postage: Optional[float] = Field(None, ge=0, le=1000)
     address: Optional[str] = Field(None, max_length=200)
     address_expected_text: Optional[str] = Field(None, max_length=200)
     brand: Optional[str] = Field(None, max_length=100)
     condition: Optional[str] = Field(None, max_length=20)
     remark: Optional[str] = Field(None, max_length=500)
+
+    @model_validator(mode="after")
+    def normalize_delivery_method(self) -> "MaterialUpdateRequest":
+        """保持兼容字段与实际运费方式一致。"""
+        if self.shipping_method is not None:
+            self.delivery_method = "pickup" if self.shipping_method == "none" else "express"
+        return self
 
 
 class PublishSingleRequest(BaseModel):
@@ -182,13 +195,19 @@ class PublishSingleRequest(BaseModel):
     sku_rows: List[PublishSkuRowRequest] = Field(default_factory=list, max_length=200)
     address: Optional[str] = None
     address_expected_text: Optional[str] = Field(None, max_length=200)
-    delivery_method: str = Field("express", description="发货方式：express/pickup")
+    delivery_method: str = Field("express", pattern="^(express|pickup)$", description="发货方式：express/pickup")
     shipping_method: str = Field("free", pattern="^(free|distance|fixed|template|none)$")
     support_pickup: bool = False
-    postage: float = Field(0, ge=0, description="邮费，0表示包邮")
+    postage: float = Field(0, ge=0, le=1000, description="邮费，0表示包邮")
     brand: Optional[str] = Field(None, description="品牌")
     condition: str = Field("全新", description="成色")
     stock: Optional[int] = Field(None, ge=1, description="库存数量，虚拟物品建议999")
+
+    @model_validator(mode="after")
+    def normalize_delivery_method(self) -> "PublishSingleRequest":
+        """以 shipping_method 为发布载荷事实来源，统一兼容字段。"""
+        self.delivery_method = "pickup" if self.shipping_method == "none" else "express"
+        return self
 
 
 class BatchPublishRequest(BaseModel):
@@ -222,7 +241,7 @@ async def recommend_category(
     current_user: User = Depends(get_current_active_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> Dict[str, Any]:
-    """按商品标题和描述调用闲鱼分类推荐接口，素材库自动轮换当前用户已启动账号。"""
+    """按商品标题和描述调用闲鱼分类推荐接口，素材库自动轮换当前用户的账号。"""
     title = req.title.strip()
     description = req.description.strip()
     if not title and not description:
@@ -237,22 +256,19 @@ async def recommend_category(
             return ApiResponse(success=False, message="指定的闲鱼账号不存在或无权使用")
         candidate_accounts = [account] if account.cookie else []
     else:
-        # 素材库不指定账号，只能使用当前登录用户自己的已启动账号，管理员也不跨用户取账号。
+        # 素材库不指定账号，与单品发布一致不校验启用状态，只要求账号有 Cookie；
+        # 管理员也不跨用户取账号。已启用账号排在前面，减少无效的平台请求。
         current_user_accounts = await account_service.list_accounts(current_user.id)
-        started_accounts = [
-            item
-            for item in current_user_accounts
-            if (item.status or "").strip().lower() == "active"
-        ]
-        if not started_accounts:
-            return ApiResponse(success=False, message="当前用户没有已启动的闲鱼账号，请先启动账号")
-        candidate_accounts = [item for item in started_accounts if item.cookie and item.cookie.strip()]
+        candidate_accounts = sorted(
+            (item for item in current_user_accounts if item.cookie and item.cookie.strip()),
+            key=lambda item: (item.status or "").strip().lower() != "active",
+        )
 
     if not candidate_accounts:
         message = (
             "指定的闲鱼账号缺少Cookie，请重新登录账号"
             if requested_account_id
-            else "当前用户已启动的闲鱼账号均缺少Cookie，请重新登录账号"
+            else "当前用户的闲鱼账号均缺少Cookie，请先添加账号或重新登录账号"
         )
         return ApiResponse(success=False, message=message)
 
@@ -289,7 +305,7 @@ async def recommend_category(
 
         if account_index < len(candidate_accounts) - 1:
             logger.info(
-                f"分类推荐自动切换下一个已启动账号: user_id={current_user.id}, "
+                f"分类推荐自动切换下一个账号: user_id={current_user.id}, "
                 f"failed_account_id={account.account_id}"
             )
 
@@ -297,7 +313,7 @@ async def recommend_category(
         return ApiResponse(success=False, message=last_error)
     return ApiResponse(
         success=False,
-        message=f"当前用户已启动的闲鱼账号均不可用：{last_error}",
+        message=f"当前用户的闲鱼账号均不可用：{last_error}",
     )
 
 

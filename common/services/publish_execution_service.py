@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -19,7 +20,18 @@ from common.models.xy_account import XYAccount
 from common.services.item_service import ItemService
 from common.services.publish_address_service import PublishAddressService
 from common.services.publish_log_service import PublishLogService
-from common.services.xianyu_publish_service import publish_single_item
+from common.services.xianyu_publish_service import (
+    detect_publish_account_capability,
+    ensure_publish_capability_reliable,
+    publish_personal_single_item,
+    publish_single_item,
+)
+
+PERSONAL_SELLER_DEFAULT_STOCK = 1
+
+# 发布成功后闲鱼平台商品列表存在索引延迟，立即拉取常常取不到刚发布的商品，
+# 因此同步前固定等待若干秒，给平台留出收录时间。
+SYNC_AFTER_PUBLISH_DELAY_SECONDS = 2
 
 
 async def _get_account(session: AsyncSession, account_id: str, user_id: int) -> Optional[XYAccount]:
@@ -44,6 +56,12 @@ async def _sync_account_items_after_publish(
 ) -> Dict[str, Any]:
     """发布成功后自动同步账号商品。"""
     item_svc = ItemService(session)
+    # 平台商品列表有索引延迟，先等待再拉取，避免刚发布的商品同步不到
+    if SYNC_AFTER_PUBLISH_DELAY_SECONDS > 0:
+        logger.info(
+            f"账号 {account_id} 发布成功，等待 {SYNC_AFTER_PUBLISH_DELAY_SECONDS} 秒后再自动获取商品"
+        )
+        await asyncio.sleep(SYNC_AFTER_PUBLISH_DELAY_SECONDS)
     try:
         sync_result = await item_svc.fetch_all_items_from_account(account=account)
         sync_status = "success" if sync_result.get("success") else "failed"
@@ -88,15 +106,15 @@ async def execute_single_publish(
     log_svc = PublishLogService(session)
     address_svc = PublishAddressService(session)
 
-    # 单品发布严格使用前端选择的账号。账号不可用时直接失败，不能把商品发布到其他账号。
+    # 单品发布严格使用前端选择的账号；启用状态只控制自动任务，不限制手动发布。
     account = await _get_account(session=session, account_id=account_id, user_id=user_id)
     cookies_str = account.cookie if account and account.cookie else ""
-    account_status = (account.status or "").strip().lower() if account else ""
-    if (
-        not account
-        or account_status != "active"
-        or not cookies_str.strip()
-    ):
+    if not account or not cookies_str.strip():
+        error_message = (
+            "选择的闲鱼账号不存在或无权使用"
+            if not account
+            else "选择的闲鱼账号缺少Cookie，请重新登录账号"
+        )
         log = await log_svc.create_log(
             user_id=user_id,
             account_id=account_id,
@@ -105,11 +123,11 @@ async def execute_single_publish(
             price=str(item_data.get("price", "")),
             material_id=item_data.get("id"),
             status="failed",
-            error_message="选择的闲鱼账号不存在、未启动或缺少Cookie",
+            error_message=error_message,
         )
         return {
             "success": False,
-            "message": "选择的闲鱼账号不存在、未启动或缺少Cookie",
+            "message": error_message,
             "log_id": log.id,
         }
 
@@ -143,13 +161,40 @@ async def execute_single_publish(
     result = None
     pub_error = None
     try:
-        result = await publish_single_item(
-            item_data=publish_item_data,
+        capability = await detect_publish_account_capability(
             cookie=cookies_str,
             account_id=account.account_id,
             owner_id=user_id,
-            static_root=static_root,
         )
+        cookies_str = capability.get("cookies_str") or cookies_str
+        # 鱼小铺账号必须走鱼小铺接口：判定不可信时报错不发布，不允许回落个人版发布
+        capability = ensure_publish_capability_reliable(capability)
+        if not capability.get("success"):
+            result = capability
+        elif capability.get("is_fish_shop"):
+            # 鱼小铺账号继续使用已验证稳定的原发布逻辑，不改变任何载荷与接口。
+            result = await publish_single_item(
+                item_data=publish_item_data,
+                cookie=cookies_str,
+                account_id=account.account_id,
+                owner_id=user_id,
+                static_root=static_root,
+            )
+        else:
+            # 普通卖家单品发布不提供视频能力，后端兜底丢弃绕过前端提交的视频。
+            personal_item_data = {
+                **publish_item_data,
+                "videos": [],
+                "quantity": PERSONAL_SELLER_DEFAULT_STOCK,
+                "stock": PERSONAL_SELLER_DEFAULT_STOCK,
+            }
+            result = await publish_personal_single_item(
+                item_data=personal_item_data,
+                cookie=cookies_str,
+                account_id=account.account_id,
+                owner_id=user_id,
+                static_root=static_root,
+            )
         if result.get("account_invalid"):
             logger.warning(
                 f"单品发布选定账号不可用，按要求不切换账号: account_id={account.account_id}, "

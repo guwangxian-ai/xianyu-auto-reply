@@ -19,6 +19,23 @@ def text(value: Any) -> str:
     return str(value).strip() if value is not None else ""
 
 
+def build_item_text_dto(title: str, description: str) -> dict[str, Any]:
+    """构造标题与正文分离的闲鱼商品文本载荷。
+
+    Args:
+        title: 商品标题。
+        description: 商品正文描述。
+    Returns:
+        dict: 可直接写入发布载荷 ``itemTextDTO`` 的文本配置。
+    """
+    return {
+        "desc": description,
+        "title": title,
+        # 开启后平台分别读取 title 与 desc，避免将正文第一行当作商品标题。
+        "titleDescSeparate": True,
+    }
+
+
 def price_in_cent(value: Any, field_name: str) -> str:
     """将元价格转换为字符串分值。"""
     try:
@@ -90,6 +107,23 @@ def build_sku_payload(
                 "propertyValues": property_values,
             }
         )
+
+    # 抓包确认：闲鱼同一商品只允许一组规格带规格图（另一组 supportImage 为 false），
+    # 两组都带图会被平台拒绝，此处提前给出中文错误而不是把不合法载荷发出去
+    image_group_names = sorted({source["property_name"] for source in property_image_sources})
+    if len(image_group_names) > 1:
+        raise DirectPublishError(
+            f"闲鱼只允许一组规格带规格图，当前有 {len(image_group_names)} 组带图："
+            f"{'、'.join(image_group_names)}，请只保留一组"
+        )
+    # 只勾选了「支持添加图片」但一张都没传时同样不能有两组 supportImage=true：
+    # 带图的那组优先，都没带图时保留第一个被勾选的组，其余置 false。
+    if sum(1 for prop in item_properties if prop["supportImage"]) > 1:
+        keep = image_group_names[0] if image_group_names else next(
+            prop["propertyName"] for prop in item_properties if prop["supportImage"]
+        )
+        for prop in item_properties:
+            prop["supportImage"] = prop["propertyName"] == keep
 
     if len(raw_rows) != expected_count:
         raise DirectPublishError(
